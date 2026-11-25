@@ -1,0 +1,267 @@
+# ---------- Cell [1] ----------
+import pandas as pd
+import nltk
+from nltk.tokenize import sent_tokenize
+from nltk.sentiment import SentimentIntensityAnalyzer
+
+df = pd.read_csv('articles_clean.csv')
+df['clean_text'] = df['clean_text'].fillna('')
+print(len(df))
+df.head(2)
+
+# ---------- Cell [2] ----------
+import pandas as pd
+import nltk
+from nltk.tokenize import sent_tokenize
+from nltk.sentiment import SentimentIntensityAnalyzer
+
+df = pd.read_csv('articles_clean.csv')
+df['clean_text'] = df['clean_text'].fillna('')
+print(len(df))
+df.head(2)
+
+# ---------- Cell [3] ----------
+sia = SentimentIntensityAnalyzer()
+
+def article_sentiment(t):
+    sents = sent_tokenize(t)
+    if not sents:
+        return 0.0
+    return sum(sia.polarity_scores(s)['compound'] for s in sents) / len(sents)
+
+df['sentiment'] = df['clean_text'].apply(article_sentiment)
+df['title_sentiment'] = df['title'].fillna('').apply(lambda t: sia.polarity_scores(t)['compound'])
+
+df.to_csv('articles_scored.csv', index=False)
+df[['sentiment', 'title_sentiment']].describe()
+
+# ---------- Cell [4] ----------
+import matplotlib.pyplot as plt
+
+means = df.groupby('hyperpartisan')[['sentiment', 'title_sentiment']].mean()
+print(means)
+
+means.plot(kind='bar')
+plt.title('Average sentiment: hyperpartisan vs not')
+plt.ylabel('Sentiment (-1 to +1)')
+plt.xticks(rotation=0)
+plt.show()
+
+# ---------- Cell [5] ----------
+top = df['outlet'].value_counts().head(10).index
+by_outlet = df[df['outlet'].isin(top)].groupby('outlet')['sentiment'].mean().sort_values()
+
+by_outlet.plot(kind='barh', figsize=(8, 5))
+plt.title('Average article sentiment by outlet (top 10 by article count)')
+plt.xlabel('Sentiment (-1 to +1)')
+plt.tight_layout()
+plt.show()
+
+# ---------- Cell [6] ----------
+import re
+
+loaded_words = {
+    'slammed', 'blasted', 'disaster', 'disgrace', 'outrage', 'outrageous', 'shocking',
+    'furious', 'radical', 'extremist', 'corrupt', 'fraud', 'scandal', 'lies', 'liar',
+    'traitor', 'betrayal', 'tyranny', 'hypocrite', 'pathetic', 'ridiculous', 'stupid',
+    'insane', 'terrible', 'horrible', 'evil', 'brutal', 'dangerous', 'nightmare',
+    'devastating', 'unbelievable', 'incredible', 'heroic', 'brilliant', 'hate',
+    'destroy', 'attack', 'crisis', 'failure', 'massive'
+}
+
+def loaded_rate(t):
+    words = re.findall(r"[a-z']+", t.lower())
+    if not words:
+        return 0.0
+    hits = sum(1 for w in words if w in loaded_words)
+    return hits / len(words) * 1000
+
+df['loaded_rate'] = df['clean_text'].apply(loaded_rate)
+df['loaded_rate'].describe()
+
+# ---------- Cell [7] ----------
+from textblob import TextBlob
+
+df['subjectivity'] = df['clean_text'].apply(lambda t: TextBlob(t).sentiment.subjectivity)
+df['title_subjectivity'] = df['title'].fillna('').apply(lambda t: TextBlob(t).sentiment.subjectivity)
+
+df.to_csv('articles_scored.csv', index=False)
+df[['subjectivity', 'title_subjectivity']].describe()
+
+# ---------- Cell [8] ----------
+cols = ['sentiment', 'title_sentiment', 'loaded_rate', 'subjectivity', 'title_subjectivity']
+compare = df.groupby('hyperpartisan')[cols].mean().round(3)
+print(compare)
+
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+for ax, c in zip(axes, ['sentiment', 'loaded_rate', 'subjectivity']):
+    df.groupby('hyperpartisan')[c].mean().rename(index={True: 'Hyperpartisan', False: 'Not'}).plot(kind='bar', ax=ax, rot=0)
+    ax.set_title(c)
+plt.tight_layout()
+plt.show()
+
+# ---------- Cell [9] ----------
+from sklearn.metrics import roc_auc_score
+
+parts = pd.DataFrame({
+    'negativity': -df['sentiment'],
+    'loaded': df['loaded_rate'],
+    'subjectivity': df['subjectivity'],
+})
+parts = (parts - parts.mean()) / parts.std()
+
+df['bias_signal'] = parts.mean(axis=1)
+df['bias_signal_0_100'] = (df['bias_signal'].rank(pct=True) * 100).round()
+
+print(df.groupby('hyperpartisan')['bias_signal'].mean().round(3))
+print("Separation score (0.5 = useless, 1.0 = perfect):",
+      round(roc_auc_score(df['hyperpartisan'], df['bias_signal']), 3))
+
+df.to_csv('articles_scored.csv', index=False)
+
+# ---------- Cell [10] ----------
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+
+X = df['title'].fillna('') + ' ' + df['clean_text']
+y = df['hyperpartisan']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+vec = TfidfVectorizer(stop_words='english', max_features=20000, ngram_range=(1, 2), min_df=2)
+Xtr = vec.fit_transform(X_train)
+Xte = vec.transform(X_test)
+
+model = LogisticRegression(max_iter=1000, class_weight='balanced')
+model.fit(Xtr, y_train)
+
+pred = model.predict(Xte)
+print(classification_report(y_test, pred))
+print(confusion_matrix(y_test, pred))
+print("Separation score:", round(roc_auc_score(y_test, model.predict_proba(Xte)[:, 1]), 3))
+
+# ---------- Cell [11] ----------
+import numpy as np
+
+names = np.array(vec.get_feature_names_out())
+order = np.argsort(model.coef_[0])
+
+print("Words pushing toward HYPERPARTISAN:")
+print(', '.join(names[order[-25:]][::-1]))
+print()
+print("Words pushing toward NOT hyperpartisan:")
+print(', '.join(names[order[:25]]))
+
+# ---------- Cell [12] ----------
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+
+extra = {
+    'fox', 'twitter', 'posted', 'associated', 'daily', 'sponsored', 'mr', 'ms',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'october', 'november', 'december', 'reuters', 'ap', 'cnn',
+    'breitbart', 'com', 'www', 'http', 'https', 'photo', 'image', 'getty', 'via'
+}
+my_stop = list(ENGLISH_STOP_WORDS.union(extra))
+
+vec2 = TfidfVectorizer(stop_words=my_stop, max_features=20000, ngram_range=(1, 2), min_df=2)
+Xtr2 = vec2.fit_transform(X_train)
+Xte2 = vec2.transform(X_test)
+
+model2 = LogisticRegression(max_iter=1000, class_weight='balanced')
+model2.fit(Xtr2, y_train)
+
+pred2 = model2.predict(Xte2)
+print(classification_report(y_test, pred2))
+print(confusion_matrix(y_test, pred2))
+print("Separation score:", round(roc_auc_score(y_test, model2.predict_proba(Xte2)[:, 1]), 3))
+
+names2 = np.array(vec2.get_feature_names_out())
+order2 = np.argsort(model2.coef_[0])
+print("\nHYPERPARTISAN:", ', '.join(names2[order2[-20:]][::-1]))
+print("NOT:", ', '.join(names2[order2[:20]]))
+
+# ---------- Cell [13] ----------
+import glob, os
+import pandas as pd
+
+files = glob.glob('indian_data/**/*.csv', recursive=True)
+print(files)
+
+big = max(files, key=os.path.getsize)
+d = pd.read_csv(big)
+print(big, len(d))
+print(d.columns.tolist())
+d.head(3)
+
+# ---------- Cell [14] ----------
+import os
+print("Working folder:", os.getcwd())
+print()
+print("Items here:", os.listdir('.'))
+print()
+if os.path.exists('indian_data'):
+    for root, dirs, fs in os.walk('indian_data'):
+        for f in fs:
+            p = os.path.join(root, f)
+            print(p, round(os.path.getsize(p) / 1e6, 2), "MB")
+else:
+    print("No folder called indian_data here")
+
+# ---------- Cell [15] ----------
+import os
+print("Outer folder:", os.listdir('..'))
+print()
+if os.path.exists('../indian_data'):
+    for root, dirs, fs in os.walk('../indian_data'):
+        for f in fs:
+            p = os.path.join(root, f)
+            print(p, round(os.path.getsize(p) / 1e6, 2), "MB")
+
+# ---------- Cell [16] ----------
+from pathlib import Path
+
+dl = Path.home() / 'Downloads'
+items = sorted(dl.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:15]
+for p in items:
+    kind = 'folder' if p.is_dir() else p.suffix
+    size = '' if p.is_dir() else f"{round(p.stat().st_size / 1e6, 2)} MB"
+    print(p.name, '|', kind, '|', size)
+
+# ---------- Cell [17] ----------
+import zipfile, os
+from pathlib import Path
+import pandas as pd
+
+dl = Path.home() / 'Downloads'
+zips = sorted(dl.glob('*.zip'), key=lambda x: x.stat().st_mtime, reverse=True)
+print("Newest zip:", zips[0].name)
+
+with zipfile.ZipFile(zips[0]) as z:
+    z.extractall('indian_data')
+
+csvs = []
+for root, dirs, fs in os.walk('indian_data'):
+    for f in fs:
+        p = os.path.join(root, f)
+        print(p, round(os.path.getsize(p) / 1e6, 2), "MB")
+        if f.endswith('.csv'):
+            csvs.append(p)
+
+d = pd.read_csv(max(csvs, key=os.path.getsize))
+print(len(d))
+print(d.columns.tolist())
+d.head(3)
+
+# ---------- Cell [18] ----------
+print(d['source'].value_counts())
+print()
+print(d['category'].value_counts().head(15))
+print()
+print("Empty articles:", d['content'].isna().sum())
+print(d['content'].fillna('').str.split().str.len().describe().round(0))
